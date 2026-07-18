@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# PyCharm
+.idea/
+
+# React / Node
+frontend/node_modules/
+frontend/dist/
