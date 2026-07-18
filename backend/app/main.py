@@ -1,17 +1,43 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from dotenv import load_dotenv
+import anthropic
 
-app = FastAPI()
+load_dotenv()
 
+app = FastAPI(title="CV Analyzer")
+client = anthropic.Anthropic()
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+class AnalyzeRequest(BaseModel):
+    cv_text: str
+    job_listing: str
 
-
-@app.get("/hello/{name}")
-async def say_hello(name: str):
-    return {"message": f"Hello {name}"}
+class AnalyzeResponse(BaseModel):
+    analysis: str
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.post("/analyze", response_model=AnalyzeResponse)
+def analyze(req: AnalyzeRequest):
+    if not req.cv_text.strip() or not req.job_listing.strip():
+        raise HTTPException(status_code=400, detail="Both cv_text and job_listing are required")
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Compare this CV against this job listing.\n"
+                    "Return: 1) matched requirements, 2) missing requirements, "
+                    "3) partially matched with explanation, 4) match score 0-100, "
+                    "5) two concrete suggestions to improve the match.\n\n"
+                    f"CV:\n{req.cv_text}\n\nJOB LISTING:\n{req.job_listing}"
+                ),
+            }],
+        )
+        return AnalyzeResponse(analysis=message.content[0].text)
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
