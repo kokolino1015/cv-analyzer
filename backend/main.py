@@ -1,12 +1,21 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 import anthropic
 
 load_dotenv()
 
 app = FastAPI(title="CV Analyzer")
 client = anthropic.Anthropic()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class AnalyzeRequest(BaseModel):
     cv_text: str
