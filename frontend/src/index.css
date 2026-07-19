@@ -105,3 +105,60 @@ button:disabled {
   font-family: inherit;
   font-size: 14.5px;
 }
+
+.file-btn {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 8px 16px;
+  background: #1e293b;
+  border: 1px dashed #475569;
+  border-radius: 8px;
+  color: #94a3b8;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.file-btn:hover {
+  border-color: #6366f1;
+  color: #c7d2fe;
+}
+
+.controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.provider-field label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+
+select {
+  padding: 11px 36px 11px 14px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  color: #e2e8f0;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2394a3b8' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+
+select:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+}

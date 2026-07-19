@@ -9,16 +9,16 @@ function App() {
     const [jobListing, setJobListing] = useState("");
     const [result, setResult] = useState("");
     const [loading, setLoading] = useState(false);
-
+    const [provider, setProvider] = useState("anthropic");
 
     const analyze = async () => {
         setLoading(true);
         setResult("");
         try {
-            const res = await fetch("http://localhost:8000/analyze", {
+            const res = await fetch("http://localhost:8000/analyze_stream", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({cv_text: cvText, job_listing: jobListing}),
+                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
             });
             if (!res.ok) {
                 const err = await res.json();
@@ -29,6 +29,33 @@ function App() {
             setResult(data.analysis);
         } catch {
             setResult("Network error — is the backend running?");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const uploadCv = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        setLoading(true);
+        try {
+            const res = await fetch("http://localhost:8000/upload_cv", {
+                method: "POST",
+                body: formData,
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                setCvText(`Error ${res.status}: ${err.detail}`);
+                return;
+            }
+            const data: { text: string } = await res.json();
+            setCvText(data.text);
+        } catch {
+            setCvText("Network error — is the backend running?");
         } finally {
             setLoading(false);
         }
@@ -47,6 +74,10 @@ function App() {
                         value={cvText}
                         onChange={(e) => setCvText(e.target.value)}
                     />
+                    <input type="file" id="cv-file" accept=".pdf" onChange={uploadCv} hidden/>
+                    <label htmlFor="cv-file" className="file-btn">
+                        📄 Upload PDF
+                    </label>
                 </div>
                 <div className="field">
                     <label>Job listing</label>
@@ -58,9 +89,22 @@ function App() {
                 </div>
             </div>
 
-            <button onClick={analyze} disabled={loading || !cvText || !jobListing}>
-                {loading ? "Analyzing..." : "Analyze"}
-            </button>
+            <div className="controls">
+                <div className="provider-field">
+                    <label htmlFor="provider">Model</label>
+                    <select
+                        id="provider"
+                        value={provider}
+                        onChange={(e) => setProvider(e.target.value)}
+                    >
+                        <option value="anthropic">Claude (Anthropic)</option>
+                        <option value="ollama">Local (Ollama)</option>
+                    </select>
+                </div>
+                <button onClick={analyze} disabled={loading || !cvText || !jobListing}>
+                    {loading ? "Analyzing..." : "Analyze"}
+                </button>
+            </div>
 
             {result && (
                 <div className="result">
