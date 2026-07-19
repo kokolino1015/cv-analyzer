@@ -11,3 +11,7 @@ def test_health():
 def test_analyze_rejects_empty_input():
     r = client.post("/analyze", json={"cv_text": "", "job_listing": ""})
     assert r.status_code == 400
+
+def test_upload_rejects_non_pdf():
+    r = client.post("/upload_cv", files={"file": ("cv.txt", b"hello", "text/plain")})
+    assert r.status_code == 400
