@@ -80,11 +80,33 @@ async def call_ollama(prompt: AnalyzeRequest):
     return response.json()
 
 
+async def call_anthropic_stream(prompt: AnalyzeRequest):
+    try:
+        with client.messages.stream(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Compare this CV against this job listing.\n"
+                    "Return: 1) matched requirements, 2) missing requirements, "
+                    "3) partially matched with explanation, 4) match score 0-100, "
+                    "5) two concrete suggestions to improve the match.\n\n"
+                    f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
+                ),
+            }],
+        ) as stream:
+            for text in stream.text_stream:
+                yield text
+    except Exception as e:
+        yield f"\n\n[ERROR: {e}]"
+
+
 async def call_ollama_stream(prompt: AnalyzeRequest):
     url = "http://localhost:11434/api/chat"
 
     payload = {
-        "model": "gemma3:27b",
+        "model": "qwen3-coder:30b",
         "messages": [{
             "role": "user",
             "content": (
@@ -94,23 +116,31 @@ async def call_ollama_stream(prompt: AnalyzeRequest):
                 "5) two concrete suggestions to improve the match.\n\n"
                 f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
             )}],
-        "stream": True
+        "stream": True,
+        "options": {
+            "temperature": 0.1
+        }
     }
-
-    async with httpx.AsyncClient() as ollama:
-        async with ollama.stream("POST", url, json=payload, timeout=120.0) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line.strip():
-                    result = json.loads(line)
-                    yield result["message"]["content"]
+    try:
+        async with httpx.AsyncClient() as ollama:
+            async with ollama.stream("POST", url, json=payload, timeout=120.0) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        result = json.loads(line)
+                        yield result["message"]["content"]
+    except httpx.HTTPError as e:
+        yield f"\n\n[ERROR: {e}]"
 
 @app.post("/analyze_stream")
 async def analyze_stream(req: AnalyzeRequest):
     if not req.cv_text.strip() or not req.job_listing.strip():
         raise HTTPException(status_code=400, detail="Both cv_text and job_listing are required")
 
-    response = call_ollama_stream(req)
+    if req.provider == "anthropic":
+        response = call_anthropic_stream(req)
+    else:
+        response = call_ollama_stream(req)
 
     return StreamingResponse(response, media_type="text/plain")
 

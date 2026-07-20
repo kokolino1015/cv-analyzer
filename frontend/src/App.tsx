@@ -10,12 +10,13 @@ function App() {
     const [result, setResult] = useState("");
     const [loading, setLoading] = useState(false);
     const [provider, setProvider] = useState("anthropic");
+    const [stream, setStream] = useState("stream");
 
     const analyze = async () => {
         setLoading(true);
         setResult("");
         try {
-            const res = await fetch("http://localhost:8000/analyze_stream", {
+            const res = await fetch("http://localhost:8000/analyze", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
@@ -29,6 +30,43 @@ function App() {
             setResult(data.analysis);
         } catch {
             setResult("Network error — is the backend running?");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const analyze_stream = async () => {
+        setLoading(true);
+        setResult("");
+        try {
+            const res = await fetch("http://localhost:8000/analyze_stream", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                setResult(`Error ${res.status}: ${err.detail}`);
+                return;
+            }
+
+            if (!res.body) {
+                setResult("No response body.");
+                return;
+            }
+
+            const decoder = new TextDecoder();
+            let reader = res.body?.getReader();
+
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                let text = decoder.decode(value, {stream: true})
+                setResult(prev => prev + text);
+            }
+        } catch {
+            setResult(prev => prev + "\n[connection lost]")
         } finally {
             setLoading(false);
         }
@@ -91,7 +129,7 @@ function App() {
 
             <div className="controls">
                 <div className="provider-field">
-                    <label htmlFor="provider">Model</label>
+                    <label htmlFor="provider">Provider</label>
                     <select
                         id="provider"
                         value={provider}
@@ -101,7 +139,18 @@ function App() {
                         <option value="ollama">Local (Ollama)</option>
                     </select>
                 </div>
-                <button onClick={analyze} disabled={loading || !cvText || !jobListing}>
+                <div className="provider-field">
+                    <label htmlFor="stream">Stream</label>
+                    <select
+                        id="stream"
+                        value={stream}
+                        onChange={(e) => setStream(e.target.value)}
+                    >
+                        <option value="stream">Stream</option>
+                        <option value="noStream">No stream</option>
+                    </select>
+                </div>
+                <button onClick={stream == "stream" ? analyze_stream : analyze} disabled={loading || !cvText || !jobListing || !stream}>
                     {loading ? "Analyzing..." : "Analyze"}
                 </button>
             </div>
