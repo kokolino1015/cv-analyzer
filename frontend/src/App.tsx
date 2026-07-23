@@ -21,8 +21,8 @@ function ScoreBadge({score}: { score: number }) {
     );
 }
 
-function RequirementList({title, items, variant}: {title: string; items: string[]; variant: "good" | "bad"}) {
-    if (items.length === 0) return null;
+function RequirementList({title, items, variant}: { title: string; items: string[]; variant: "good" | "bad" }) {
+    if (items == null || items.length === 0) return null;
     return (
         <div className={`req-list ${variant}`}>
             <h3>{title}</h3>
@@ -36,17 +36,24 @@ function RequirementList({title, items, variant}: {title: string; items: string[
 function App() {
     const [cvText, setCvText] = useState("");
     const [jobListing, setJobListing] = useState("");
-    const [structure, setStructure] = useState<StructuredAnalysis | null>(null);
+    const [structuredOutput, setStructuredOutput] = useState<Partial<StructuredAnalysis> | null>(null);
     const [result, setResult] = useState("");
     const [loading, setLoading] = useState(false);
     const [provider, setProvider] = useState("anthropic");
     const [stream, setStream] = useState("stream");
+    const [structured, setStructured] = useState("structured");
+    const baseURL = "http://localhost:8000";
 
-    const analyze = async () => {
+    const emptyOutput = () => {
         setLoading(true);
         setResult("");
+        setStructuredOutput(null);
+    }
+
+    const analyze = async () => {
+        emptyOutput();
         try {
-            const res = await fetch("http://localhost:8000/analyze", {
+            const res = await fetch(baseURL + "/analyze", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
@@ -66,11 +73,9 @@ function App() {
     };
 
     const analyzeStructured = async () => {
-        setLoading(true);
-        setResult("");
-        setStructure(null)
+        emptyOutput();
         try {
-            const res = await fetch("http://localhost:8000/analyze_structured", {
+            const res = await fetch(baseURL + "/analyze_structured", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
@@ -81,7 +86,7 @@ function App() {
                 return;
             }
             const data: StructuredAnalysis = await res.json();
-            setStructure(data);
+            setStructuredOutput(data);
         } catch {
             setResult("Network error — is the backend running?");
         } finally {
@@ -90,11 +95,9 @@ function App() {
     };
 
     const analyzeStream = async () => {
-        setLoading(true);
-        setResult("");
-        setStructure(null)
+        emptyOutput();
         try {
-            const res = await fetch("http://localhost:8000/analyze_stream", {
+            const res = await fetch(baseURL + "/analyze_stream", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
@@ -127,6 +130,88 @@ function App() {
         }
     };
 
+    const analyzeStructuredStream = async () => {
+        emptyOutput();
+        try {
+            const res = await fetch(baseURL + "/analyze_structured_stream", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                setResult(`Error ${res.status}: ${err.detail}`);
+                return;
+            }
+
+            if (!res.body) {
+                setResult("No response body.");
+                return;
+            }
+
+            const decoder = new TextDecoder();
+            let reader = res.body?.getReader();
+
+            let buffer = "";
+
+            while (true) {
+                const {done, value} = await reader.read();
+                if (done) break;
+                let text = decoder.decode(value, {stream: true});
+                buffer += text;
+                checkForValidPartsInBuffer(buffer);
+            }
+        } catch {
+            setResult(prev => prev + "\n[connection lost]")
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const checkForValidPartsInBuffer = (buffer: string) => {
+        let stack = [];
+        let inString = false;
+        for (let i = 0; i < buffer.length; i++) {
+            let el = buffer[i];
+            if (inString) {
+                if (el === '"' && buffer[i - 1] !== '\\') inString = false;
+            } else {
+                if (el === '"') inString = true;
+                else if (el === '{' || el === '[') stack.push(el);
+                else if (el === '}' || el === ']') stack.pop();
+            }
+        }
+
+        if (inString) {
+            buffer = buffer.substring(0, buffer.lastIndexOf('"'));
+        }
+
+        buffer = buffer.trimEnd();
+        if (buffer.at(-1) === ':') {
+            let lastComma = buffer.lastIndexOf(',');
+            let lastBrace = buffer.lastIndexOf('{');
+            let cutPoint = Math.max(lastComma, lastBrace);
+            buffer = buffer.substring(0, cutPoint);
+        }
+        buffer = buffer.trimEnd();
+        if (buffer.at(-1) === ',') buffer = buffer.slice(0, -1);
+
+        while (stack.length > 0) {
+            let el = stack.pop();
+            if (el == "{") {
+                buffer += "}";
+            } else {
+                buffer += "]";
+            }
+        }
+        try {
+            const parsed = JSON.parse(buffer);
+            setStructuredOutput(parsed);
+        } catch {
+        }
+    }
+
     const uploadCv = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -136,7 +221,7 @@ function App() {
 
         setLoading(true);
         try {
-            const res = await fetch("http://localhost:8000/upload_cv", {
+            const res = await fetch(baseURL + "/upload_cv", {
                 method: "POST",
                 body: formData,
             });
@@ -153,6 +238,15 @@ function App() {
             setLoading(false);
         }
     };
+
+    const manageQuery = () =>
+        stream == "stream" && structured == "structured"
+            ? analyzeStructuredStream()
+            : stream == "stream" && structured == "notStructured"
+                ? analyzeStream()
+                : stream == "noStream" && structured == "structured"
+                    ? analyzeStructured()
+                    : analyze();
 
     return (
         <div className="container">
@@ -205,12 +299,20 @@ function App() {
                         <option value="noStream">No stream</option>
                     </select>
                 </div>
-                <button onClick={stream == "stream" ? analyzeStream : analyze}
-                        disabled={loading || !cvText || !jobListing || !stream}>
+                <div className="provider-field">
+                    <label htmlFor="structured">Output</label>
+                    <select
+                        id="structured"
+                        value={structured}
+                        onChange={(e) => setStructured(e.target.value)}
+                    >
+                        <option value="structured">Structured</option>
+                        <option value="notStructured">Not structured</option>
+                    </select>
+                </div>
+                <button onClick={manageQuery}
+                        disabled={loading || !cvText || !jobListing}>
                     {loading ? "Analyzing..." : "Analyze"}
-                </button>
-                <button onClick={analyzeStructured} disabled={loading || !cvText || !jobListing || !stream}>
-                    {loading ? "Analyzing..." : "Analyze structed"}
                 </button>
             </div>
 
@@ -220,15 +322,15 @@ function App() {
                     <pre>{result}</pre>
                 </div>
             )}
-            {structure && (
+            {structuredOutput && (
                 <div className="result">
                     <h2>Structured Analysis</h2>
-                    <ScoreBadge score={structure.score}/>
+                    {structuredOutput.score !== undefined && <ScoreBadge score={structuredOutput.score}/>}
                     <div className="req-columns">
-                        <RequirementList title="Matched" items={structure.matched} variant="good"/>
-                        <RequirementList title="Missing" items={structure.missing} variant="bad"/>
+                        <RequirementList title="Matched" items={structuredOutput.matched ?? []} variant="good"/>
+                        <RequirementList title="Missing" items={structuredOutput.missing ?? []} variant="bad"/>
                     </div>
-                    <RequirementList title="Suggestions" items={structure.suggestions} variant="good"/>
+                    <RequirementList title="Suggestions" items={structuredOutput.suggestions ?? []} variant="good"/>
                 </div>
             )}
         </div>

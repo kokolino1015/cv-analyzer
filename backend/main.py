@@ -36,11 +36,27 @@ class UploadResponse(BaseModel):
 class AnalyzeRequest(BaseModel):
     cv_text: str
     job_listing: str
-    provider: Literal["anthropic", "ollama"] = "ollama"
+    provider: Literal["anthropic", "ollama"] = "anthropic"
 
 
 class AnalyzeResponse(BaseModel):
     analysis: str
+
+
+def task_prompt(req: AnalyzeRequest) -> str:
+    return (
+        "Compare this CV against this job listing.\n"
+        "Identify: 1) matched requirements, 2) missing requirements, "
+        "3) a match score 0-100, 4) two concrete suggestions to improve the match.\n\n"
+        f"CV:\n{req.cv_text}\n\nJOB LISTING:\n{req.job_listing}"
+    )
+def json_prompt(req: AnalyzeRequest) -> str:
+    return (
+        "Respond with ONLY a valid JSON object — no markdown, no code fences, no text "
+        'before or after — in exactly this structure: {"score": <integer 0-100>, '
+        '"matched": [<strings>], "missing": [<strings>], "suggestions": [<strings>]}.\n\n'
+        + task_prompt(req)
+    )
 
 
 @app.get("/health")
@@ -52,16 +68,7 @@ def call_anthropic(prompt: AnalyzeRequest):
     return client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1500,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Compare this CV against this job listing.\n"
-                "Return: 1) matched requirements, 2) missing requirements, "
-                "3) partially matched with explanation, 4) match score 0-100, "
-                "5) two concrete suggestions to improve the match.\n\n"
-                f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
-            ),
-        }],
+        messages=[{"role": "user", "content": task_prompt(prompt)}],
     )
 
 
@@ -69,15 +76,7 @@ async def call_ollama(prompt: AnalyzeRequest):
     url = "http://localhost:11434/api/chat"
     payload = {
         "model": "gemma3:27b",
-        "messages": [{
-            "role": "user",
-            "content": (
-                "Compare this CV against this job listing.\n"
-                "Return: 1) matched requirements, 2) missing requirements, "
-                "3) partially matched with explanation, 4) match score 0-100, "
-                "5) two concrete suggestions to improve the match.\n\n"
-                f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
-            )}],
+        "messages": [{"role": "user", "content": task_prompt(prompt)}],
         "stream": False
     }
 
@@ -100,12 +99,9 @@ def call_anthropic_structured(prompt: AnalyzeRequest):
         tool_choice={"type": "tool", "name": "submit_analysis"},
         messages=[{
             "role": "user",
-            "content": (
-                "Compare this CV against the job listing and submit the analysis.\n\n"
-                f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
-            ),
-        }],
+           "content": task_prompt(prompt)}]
     )
+
 
 async def call_ollama_structured(prompt: AnalyzeRequest):
     url = "http://localhost:11434/api/chat"
@@ -113,12 +109,7 @@ async def call_ollama_structured(prompt: AnalyzeRequest):
         "model": "gemma3:27b",
         "messages": [{
             "role": "user",
-            "content": (
-                'Compare this CV against the job listing. Respond with ONLY a valid JSON object — no markdown, '
-                'no code fences, no text before or after — in exactly this structure: {"score": <integer 0-100>, "matched": [<strings>], '
-                '"missing": [<strings>], "suggestions": [<strings>]}. '
-                f'CV:\n{prompt.cv_text}\n\nLISTING:\n{prompt.job_listing}'
-            )}],
+            "content": json_prompt(prompt)}],
         "stream": False,
         "format": StructuredAnalysis.model_json_schema()
     }
@@ -132,18 +123,12 @@ async def call_ollama_structured(prompt: AnalyzeRequest):
 async def call_anthropic_stream(prompt: AnalyzeRequest):
     try:
         with client.messages.stream(
-            model="claude-sonnet-4-6",
-            max_tokens=1500,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Compare this CV against this job listing.\n"
-                    "Return: 1) matched requirements, 2) missing requirements, "
-                    "3) partially matched with explanation, 4) match score 0-100, "
-                    "5) two concrete suggestions to improve the match.\n\n"
-                    f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
-                ),
-            }],
+                model="claude-sonnet-4-6",
+                max_tokens=1500,
+                messages=[{
+                    "role": "user",
+                    "content": task_prompt(prompt),
+                }],
         ) as stream:
             for text in stream.text_stream:
                 yield text
@@ -155,20 +140,61 @@ async def call_ollama_stream(prompt: AnalyzeRequest):
     url = "http://localhost:11434/api/chat"
 
     payload = {
-        "model": "qwen3-coder:30b",
+        "model": "gemma3:27b",
         "messages": [{
             "role": "user",
-            "content": (
-                "Compare this CV against this job listing.\n"
-                "Return: 1) matched requirements, 2) missing requirements, "
-                "3) partially matched with explanation, 4) match score 0-100, "
-                "5) two concrete suggestions to improve the match.\n\n"
-                f"CV:\n{prompt.cv_text}\n\nJOB LISTING:\n{prompt.job_listing}"
-            )}],
+            "content": task_prompt(prompt)}],
         "stream": True,
         "options": {
             "temperature": 0.1
         }
+    }
+    try:
+        async with httpx.AsyncClient() as ollama:
+            async with ollama.stream("POST", url, json=payload, timeout=120.0) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.strip():
+                        result = json.loads(line)
+                        yield result["message"]["content"]
+    except httpx.HTTPError as e:
+        yield f"\n\n[ERROR: {e}]"
+
+
+async def call_anthropic_structured_stream(prompt: AnalyzeRequest):
+    try:
+        with client.messages.stream(
+            model="claude-sonnet-4-6",
+            max_tokens=1500,
+            temperature=0,
+            tools=[{
+                "name": "submit_analysis",
+                "description": "Submit the CV-vs-listing analysis result",
+                "input_schema": StructuredAnalysis.model_json_schema(),
+            }],
+            tool_choice={"type": "tool", "name": "submit_analysis"},
+            messages=[{
+                "role": "user",
+                "content": task_prompt(prompt),
+            }],
+        ) as stream:
+            for event in stream:
+                if event.type == "content_block_delta" and event.delta.type == "input_json_delta":
+                    yield event.delta.partial_json
+    except Exception as e:
+        yield f"\n\n[ERROR: {e}]"
+
+
+async def call_ollama_structured_stream(prompt: AnalyzeRequest):
+    url = "http://localhost:11434/api/chat"
+
+    payload = {
+        "model": "gemma3:27b",
+        "messages": [{
+            "role": "user",
+            "content": json_prompt(prompt)}],
+        "stream": True,
+        "format": StructuredAnalysis.model_json_schema()
     }
     try:
         async with httpx.AsyncClient() as ollama:
@@ -244,6 +270,18 @@ async def analyze_structured(req: AnalyzeRequest):
         return StructuredAnalysis(**parsed)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=f"Model output failed validation: {e}")
+
+
+@app.post("/analyze_structured_stream")
+async def analyze_structured_stream(req: AnalyzeRequest):
+    if not req.cv_text.strip() or not req.job_listing.strip():
+        raise HTTPException(status_code=400, detail="Both cv_text and job_listing are required")
+    if req.provider == "anthropic":
+        gen = call_anthropic_structured_stream(req)
+    else:
+        gen = call_ollama_structured_stream(req)
+    return StreamingResponse(gen, media_type="text/plain")
+
 
 @app.post("/upload_cv", response_model=UploadResponse)
 async def upload_cv(file: UploadFile = File(...)):
