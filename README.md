@@ -4,8 +4,6 @@ AI-powered tool that compares a CV against a job listing and returns a match ana
 
 Built as a fullstack learning project with a focus on real LLM integration patterns: multi-provider support, schema-constrained structured output, and token-by-token streaming with live-assembling UI.
 
-![CV Analyzer](docs/screenshot.png)
-
 ## Features
 
 - **Multi-provider LLM backend** — Anthropic (Claude) via the official SDK, and local models via Ollama's native HTTP API (httpx), selectable per request
