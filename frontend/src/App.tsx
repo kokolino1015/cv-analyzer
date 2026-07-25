@@ -42,7 +42,7 @@ function App() {
     const [provider, setProvider] = useState("anthropic");
     const [stream, setStream] = useState("stream");
     const [structured, setStructured] = useState("structured");
-    const baseURL = "http://localhost:8000";
+    const baseURL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
     const emptyOutput = () => {
         setLoading(true);

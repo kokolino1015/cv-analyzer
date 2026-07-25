@@ -1,74 +1,121 @@
 # CV Analyzer
-
-AI-powered tool that compares a CV against a job listing and returns a match analysis — a match score, matched and missing requirements, and concrete suggestions to improve the fit.
-
-Built as a fullstack learning project with a focus on real LLM integration patterns: multi-provider support, schema-constrained structured output, and token-by-token streaming with live-assembling UI.
-
-## Features
-
-- **Multi-provider LLM backend** — Anthropic (Claude) via the official SDK, and local models via Ollama's native HTTP API (httpx), selectable per request
-- **Four analysis modes** — plain text or structured output, each available streaming or non-streaming
-- **Schema-constrained structured output** — Anthropic via forced tool use (`tool_choice` + `input_schema`), Ollama via the `format` JSON-schema parameter; both driven by a single Pydantic model that also validates the output server-side
-- **Streaming structured output with a hand-rolled partial JSON parser** — the frontend parses incomplete JSON as it streams (stack-based bracket balancing with string-state tracking), so the score badge and requirement lists assemble live
-- **PDF upload** — extracts CV text server-side (pypdf) with validation for non-PDFs, corrupt files, and scanned images
-- **Layered error handling** — distinct status codes for client errors (400), upstream LLM failures (502), and provider unavailability (503); in-stream failures surface as error markers since headers are already sent
-
-## Tech stack
-
-- **Backend:** Python, FastAPI, Pydantic, httpx, Anthropic SDK, pypdf
-- **Frontend:** React, TypeScript, Vite
-- **Infra:** Docker, GitHub Actions (CI), pytest
-
-## Running locally
-
-### Backend
+ 
+An AI service that scores a CV against a job listing and returns a structured match analysis — a score, matched requirements, gaps, and concrete suggestions.
+ 
+Built to explore the parts of LLM product engineering that are actually hard: routing between providers, getting reliable structured output out of a model, and streaming a partially-formed response to a UI without it flickering or breaking.
+ 
+![Demo](docs/CV-analyzer.png)
+ 
+## What it does
+ 
+Paste a CV and a job listing (or upload the CV as a PDF), pick a provider and output mode, and get back an analysis. The interesting part is *how* the analysis is produced — the app supports four combinations across two providers, and each combination exercises a different technical path.
+ 
+| | Not structured | Structured |
+|---|---|---|
+| **No stream** | Plain text analysis | Validated JSON: score, matched, missing, suggestions |
+| **Stream** | Text streamed token-by-token | JSON streamed and assembled live in the UI |
+ 
+## Architecture
+ 
+Two services, plus a local model that stays on the host.
+ 
+- **Backend** — FastAPI. Handles provider routing, structured-output enforcement, streaming, and PDF text extraction. Runs in a container.
+- **Frontend** — React + TypeScript, built with Vite, served by nginx. Runs in a container.
+- **Ollama** — the local model provider. Runs **on the host, not in a container**, because the model needs GPU access. The backend reaches it via `host.docker.internal`.
+### Provider routing
+ 
+A single `provider` field on the request switches the backend between two model backends:
+ 
+- **Anthropic** — via the official SDK.
+- **Ollama** — a locally hosted model via its HTTP API.
+The two providers have different failure modes, so the backend keeps an explicit error taxonomy rather than collapsing everything into a 500:
+ 
+- `400` — bad client input (missing CV or job listing).
+- `502` — the model returned output that couldn't be parsed or validated.
+- `503` — the local provider (Ollama) is unreachable.
+This means a bad prompt, a malformed model response, and a dead provider are never confused with one another — which matters when you're debugging why a call failed.
+ 
+### Structured output
+ 
+Getting a model to reliably return JSON that matches a schema is done differently per provider, but both are driven by a **single Pydantic model** so there's one source of truth:
+ 
+- **Anthropic** — forced tool use. The model is given a tool whose input schema *is* the Pydantic schema, and is required to call it, so the response is shaped by the schema rather than hoping the prose contains valid JSON.
+- **Ollama** — JSON-schema-constrained generation. The same Pydantic schema is passed as a format constraint, so the model's output is restricted to valid instances.
+In both cases the response is **re-validated server-side against the same Pydantic model** before it reaches the client. The model's output is never trusted as-is.
+ 
+### Streaming and partial-JSON assembly
+ 
+Both providers stream. Plain-text streaming is straightforward — tokens arrive, they're appended. Structured streaming is the harder problem: the JSON is incomplete on every chunk until the very last one, so it can't just be `JSON.parse`d as it arrives.
+ 
+The frontend handles this by tracking bracket/quote depth as bytes stream in, closing any open structures to form a *valid* partial object, and parsing that — so the UI can render the score and matched requirements as they populate, mid-stream, rather than waiting for the whole response.
+ 
+> **Note on the parser:** the current approach is a hand-written depth tracker, which works but is all-or-nothing per chunk and has edge cases around escaped characters inside strings. The cleaner solution is NDJSON — have the backend emit one complete JSON object per line — which sidesteps partial-parsing entirely. That's the planned next step; the current version is kept because building it surfaced *why* NDJSON is the right answer.
+ 
+## Running it
+ 
+### With Docker (recommended)
+ 
+Ollama must be running on your host first (it stays outside Docker for GPU access):
+ 
+```bash
+ollama serve
+ollama pull <your-model>
+```
+ 
+Then:
+ 
+```bash
+git clone <repo-url>
+cd cv-analyzer
+cp .env.example .env      # add your Anthropic API key
+docker compose up --build
+```
+ 
+- Frontend: http://localhost:3000
+- Backend API + docs: http://localhost:8000/docs
+### Locally, without Docker
+ 
+Backend:
+ 
 ```bash
 cd backend
-python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-echo "ANTHROPIC_API_KEY=your-key-here" > .env
 uvicorn main:app --reload
 ```
-API docs at http://localhost:8000/docs
-
-For the Ollama provider, [Ollama](https://ollama.com) must be running locally with a pulled model (default: `gemma3:27b`).
-
-### Frontend
+ 
+Frontend:
+ 
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-App at http://localhost:5173
-
-### Docker (backend)
-```bash
-cd backend
-docker build -t cv-analyzer .
-docker run -p 8000:8000 --env-file .env cv-analyzer
-```
-
-## API
-
-- `GET /health` — liveness check
-- `POST /analyze` — full text analysis
-- `POST /analyze_stream` — text analysis, streamed token by token
-- `POST /analyze_structured` — validated JSON result (score, matched, missing, suggestions)
-- `POST /analyze_structured_stream` — structured result streamed as partial JSON, parsed incrementally client-side
-- `POST /upload_cv` — PDF upload, returns extracted text
-
-All analyze endpoints accept `{ "cv_text": "...", "job_listing": "...", "provider": "anthropic" | "ollama" }`.
-
-## Notes on the partial JSON parser
-
-Streaming a JSON object token-by-token means the buffer is almost always invalid JSON mid-stream. The frontend repairs it on each chunk: a stack tracks open brackets, a flag tracks string state (so structural characters inside strings are ignored), dangling strings and separators are trimmed, open brackets are closed in LIFO order, and the result is parsed — falling back to the last valid parse on failure.
-
-Hand-rolling this surfaced its real limits (incomplete trailing key-values fail the whole parse; truncation can desync the bracket stack). The robust production alternatives are a battle-tested partial-JSON library, or streaming NDJSON events so each field parses independently.
-
-## What I'd add next
-
-- NDJSON event streaming as the robust alternative to partial JSON parsing
-- Swap the hand-rolled parser for `best-effort-json-parser` for edge cases (escapes, unicode)
-- docker-compose for one-command startup of both services
-- Deployment (rate-limited) with a hosted demo
-- Async Anthropic client for fully non-blocking streaming
+ 
+The Anthropic-only path works with just an API key; the Ollama path needs Ollama running locally.
+ 
+## Configuration
+ 
+| Variable | Where | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | `.env` | Anthropic API access (same value everywhere). |
+| `CORS_ORIGINS` | `.env` | Comma-separated origins allowed to call the API. |
+| `APP_PORT` | `.env` | Host port for the backend. |
+| `OLLAMA_URL` | `docker-compose.yaml` | Set to `host.docker.internal` in Docker; native runs fall back to `localhost` via a code default. |
+ 
+`OLLAMA_URL` lives in compose rather than `.env` on purpose: it needs a *different* value in Docker (`host.docker.internal`) than when run natively (`localhost`), so the Docker-specific value stays in the Docker-specific file, and native runs use the code default.
+ 
+Copy `.env.example` to `.env` and fill in your own values. `.env` is gitignored and never committed.
+ 
+## Tech stack
+ 
+**Backend:** Python, FastAPI, Pydantic, pypdf, pytest
+**Frontend:** React, TypeScript, Vite, nginx
+**Infra:** Docker (multi-stage frontend build), GitHub Actions CI
+**Models:** Anthropic API, Ollama
+ 
+## Roadmap
+ 
+- NDJSON streaming to replace the hand-written partial-JSON parser
+- Side-by-side comparison of both providers on the same input
+- Rate limiting and a spend cap, as prerequisites for a public deployment
+- Async Anthropic client

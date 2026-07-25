@@ -1,3 +1,5 @@
+import os
+
 import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
@@ -11,12 +13,15 @@ from fastapi.responses import StreamingResponse
 
 load_dotenv()
 
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+
 app = FastAPI(title="CV Analyzer")
 client = anthropic.Anthropic()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -73,7 +78,7 @@ def call_anthropic(prompt: AnalyzeRequest):
 
 
 async def call_ollama(prompt: AnalyzeRequest):
-    url = "http://localhost:11434/api/chat"
+    url = OLLAMA_URL
     payload = {
         "model": "gemma3:27b",
         "messages": [{"role": "user", "content": task_prompt(prompt)}],
@@ -104,7 +109,7 @@ def call_anthropic_structured(prompt: AnalyzeRequest):
 
 
 async def call_ollama_structured(prompt: AnalyzeRequest):
-    url = "http://localhost:11434/api/chat"
+    url = OLLAMA_URL
     payload = {
         "model": "gemma3:27b",
         "messages": [{
@@ -137,7 +142,7 @@ async def call_anthropic_stream(prompt: AnalyzeRequest):
 
 
 async def call_ollama_stream(prompt: AnalyzeRequest):
-    url = "http://localhost:11434/api/chat"
+    url = OLLAMA_URL
 
     payload = {
         "model": "gemma3:27b",
@@ -186,7 +191,7 @@ async def call_anthropic_structured_stream(prompt: AnalyzeRequest):
 
 
 async def call_ollama_structured_stream(prompt: AnalyzeRequest):
-    url = "http://localhost:11434/api/chat"
+    url = OLLAMA_URL
 
     payload = {
         "model": "gemma3:27b",
