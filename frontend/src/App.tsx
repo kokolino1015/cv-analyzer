@@ -11,6 +11,8 @@ interface StructuredAnalysis {
     suggestions: string[];
 }
 
+class ApiError extends Error {}
+
 function ScoreBadge({score}: { score: number }) {
     const color = score >= 70 ? "#22c55e" : score >= 40 ? "#f59e0b" : "#ef4444";
     return (
@@ -33,6 +35,25 @@ function RequirementList({title, items, variant}: { title: string; items: string
     );
 }
 
+async function extractErrorMessage(res: Response): Promise<string> {
+    const err = await res.json();
+    return `Error ${res.status}: ${err.detail}`;
+}
+
+async function readStream(res: Response, onChunk: (text: string) => void, onNoBody: () => void) {
+    if (!res.body) {
+        onNoBody();
+        return;
+    }
+    const decoder = new TextDecoder();
+    const reader = res.body.getReader();
+    while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        onChunk(decoder.decode(value, {stream: true}));
+    }
+}
+
 function App() {
     const [cvText, setCvText] = useState("");
     const [jobListing, setJobListing] = useState("");
@@ -50,23 +71,24 @@ function App() {
         setStructuredOutput(null);
     }
 
+    const postAnalyze = async (path: string): Promise<Response> => {
+        const res = await fetch(baseURL + path, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
+        });
+        if (!res.ok) throw new ApiError(await extractErrorMessage(res));
+        return res;
+    };
+
     const analyze = async () => {
         emptyOutput();
         try {
-            const res = await fetch(baseURL + "/analyze", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
-            });
-            if (!res.ok) {
-                const err = await res.json();
-                setResult(`Error ${res.status}: ${err.detail}`);
-                return;
-            }
+            const res = await postAnalyze("/analyze");
             const data: AnalyzeResponse = await res.json();
             setResult(data.analysis);
-        } catch {
-            setResult("Network error — is the backend running?");
+        } catch (e) {
+            setResult(e instanceof ApiError ? e.message : "Network error — is the backend running?");
         } finally {
             setLoading(false);
         }
@@ -75,20 +97,11 @@ function App() {
     const analyzeStructured = async () => {
         emptyOutput();
         try {
-            const res = await fetch(baseURL + "/analyze_structured", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
-            });
-            if (!res.ok) {
-                const err = await res.json();
-                setResult(`Error ${res.status}: ${err.detail}`);
-                return;
-            }
+            const res = await postAnalyze("/analyze_structured");
             const data: StructuredAnalysis = await res.json();
             setStructuredOutput(data);
-        } catch {
-            setResult("Network error — is the backend running?");
+        } catch (e) {
+            setResult(e instanceof ApiError ? e.message : "Network error — is the backend running?");
         } finally {
             setLoading(false);
         }
@@ -97,34 +110,15 @@ function App() {
     const analyzeStream = async () => {
         emptyOutput();
         try {
-            const res = await fetch(baseURL + "/analyze_stream", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
-            });
-
-            if (!res.ok) {
-                const err = await res.json();
-                setResult(`Error ${res.status}: ${err.detail}`);
-                return;
-            }
-
-            if (!res.body) {
-                setResult("No response body.");
-                return;
-            }
-
-            const decoder = new TextDecoder();
-            let reader = res.body?.getReader();
-
-            while (true) {
-                const {done, value} = await reader.read();
-                if (done) break;
-                let text = decoder.decode(value, {stream: true})
-                setResult(prev => prev + text);
-            }
-        } catch {
-            setResult(prev => prev + "\n[connection lost]")
+            const res = await postAnalyze("/analyze_stream");
+            await readStream(
+                res,
+                text => setResult(prev => prev + text),
+                () => setResult("No response body."),
+            );
+        } catch (e) {
+            if (e instanceof ApiError) setResult(e.message);
+            else setResult(prev => prev + "\n[connection lost]");
         } finally {
             setLoading(false);
         }
@@ -132,48 +126,30 @@ function App() {
 
     const analyzeStructuredStream = async () => {
         emptyOutput();
+        let buffer = "";
         try {
-            const res = await fetch(baseURL + "/analyze_structured_stream", {
-                method: "POST",
-                headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
-            });
-
-            if (!res.ok) {
-                const err = await res.json();
-                setResult(`Error ${res.status}: ${err.detail}`);
-                return;
-            }
-
-            if (!res.body) {
-                setResult("No response body.");
-                return;
-            }
-
-            const decoder = new TextDecoder();
-            let reader = res.body?.getReader();
-
-            let buffer = "";
-
-            while (true) {
-                const {done, value} = await reader.read();
-                if (done) break;
-                let text = decoder.decode(value, {stream: true});
-                buffer += text;
-                checkForValidPartsInBuffer(buffer);
-            }
-        } catch {
-            setResult(prev => prev + "\n[connection lost]")
+            const res = await postAnalyze("/analyze_structured_stream");
+            await readStream(
+                res,
+                text => {
+                    buffer += text;
+                    checkForValidPartsInBuffer(buffer);
+                },
+                () => setResult("No response body."),
+            );
+        } catch (e) {
+            if (e instanceof ApiError) setResult(e.message);
+            else setResult(prev => prev + "\n[connection lost]");
         } finally {
             setLoading(false);
         }
     };
 
     const checkForValidPartsInBuffer = (buffer: string) => {
-        let stack = [];
+        const stack = [];
         let inString = false;
         for (let i = 0; i < buffer.length; i++) {
-            let el = buffer[i];
+            const el = buffer[i];
             if (inString) {
                 if (el === '"' && buffer[i - 1] !== '\\') inString = false;
             } else {
@@ -189,26 +165,23 @@ function App() {
 
         buffer = buffer.trimEnd();
         if (buffer.at(-1) === ':') {
-            let lastComma = buffer.lastIndexOf(',');
-            let lastBrace = buffer.lastIndexOf('{');
-            let cutPoint = Math.max(lastComma, lastBrace);
+            const lastComma = buffer.lastIndexOf(',');
+            const lastBrace = buffer.lastIndexOf('{');
+            const cutPoint = Math.max(lastComma, lastBrace);
             buffer = buffer.substring(0, cutPoint);
         }
         buffer = buffer.trimEnd();
         if (buffer.at(-1) === ',') buffer = buffer.slice(0, -1);
 
         while (stack.length > 0) {
-            let el = stack.pop();
-            if (el == "{") {
-                buffer += "}";
-            } else {
-                buffer += "]";
-            }
+            const el = stack.pop();
+            buffer += el === "{" ? "}" : "]";
         }
         try {
             const parsed = JSON.parse(buffer);
             setStructuredOutput(parsed);
         } catch {
+            // buffer is still an incomplete JSON fragment — ignore and wait for more chunks
         }
     }
 
@@ -226,8 +199,7 @@ function App() {
                 body: formData,
             });
             if (!res.ok) {
-                const err = await res.json();
-                setCvText(`Error ${res.status}: ${err.detail}`);
+                setCvText(await extractErrorMessage(res));
                 return;
             }
             const data: { text: string } = await res.json();
