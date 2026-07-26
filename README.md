@@ -1,14 +1,14 @@
 # CV Analyzer
  
-An AI service that scores a CV against a job listing and returns a structured match analysis — a score, matched requirements, gaps, and concrete suggestions.
+An AI service that scores a CV against a job listing and returns a structured match analysis - a score, matched requirements, gaps in your CV, and concrete suggestions.
  
-Built to explore the parts of LLM product engineering that are actually hard: routing between providers, getting reliable structured output out of a model, and streaming a partially-formed response to a UI without it flickering or breaking.
+Built to explore the parts of LLM product engineering that are actually difficult to structure and execute: routing between providers, getting reliable structured output out of a model, and streaming a partially-formed response to a UI without it exposing the UI to unwanted visual artifacts.
  
 ![Demo](docs/CV-analyzer.png)
  
 ## What it does
  
-Paste a CV and a job listing (or upload the CV as a PDF), pick a provider and output mode, and get back an analysis. The interesting part is *how* the analysis is produced — the app supports four combinations across two providers, and each combination exercises a different technical path.
+Paste a CV and a job listing (or upload the CV as a PDF), pick a provider and output mode, and receive your analysis. The interesting part is *how* the analysis is produced - the app supports four combinations across two providers, and each combination exercises a different technical path.
  
 | | Not structured | Structured |
 |---|---|---|
