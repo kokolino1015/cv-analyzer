@@ -2,6 +2,7 @@ import httpx
 import anthropic
 import pytest
 from fastapi.testclient import TestClient
+import analysis
 
 import main
 from main import app
@@ -108,7 +109,7 @@ STRUCTURED_RESULT = {"score": 85, "matched": ["Python"], "missing": ["AWS"], "su
 
 def test_analyze_structured_anthropic_success(monkeypatch):
     monkeypatch.setattr(
-        main, "call_anthropic_structured",
+        analysis, "call_anthropic_structured",
         lambda req: FakeMessage([FakeContentBlock(input=STRUCTURED_RESULT)]),
     )
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "anthropic"})
@@ -122,7 +123,7 @@ async def fake_call_ollama_structured(_req):
 
 
 def test_analyze_structured_ollama_success_extracts_json_from_prose(monkeypatch):
-    monkeypatch.setattr(main, "call_ollama_structured", fake_call_ollama_structured)
+    monkeypatch.setattr(analysis, "call_ollama_structured", fake_call_ollama_structured)
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "ollama"})
     assert r.status_code == 200
     assert r.json() == STRUCTURED_RESULT
@@ -133,7 +134,7 @@ async def fake_call_ollama_structured_no_json(_req):
 
 
 def test_analyze_structured_ollama_no_json_maps_to_502(monkeypatch):
-    monkeypatch.setattr(main, "call_ollama_structured", fake_call_ollama_structured_no_json)
+    monkeypatch.setattr(analysis, "call_ollama_structured", fake_call_ollama_structured_no_json)
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "ollama"})
     assert r.status_code == 502
 
@@ -143,7 +144,7 @@ async def fake_call_ollama_structured_malformed_json(_req):
 
 
 def test_analyze_structured_ollama_malformed_json_maps_to_502(monkeypatch):
-    monkeypatch.setattr(main, "call_ollama_structured", fake_call_ollama_structured_malformed_json)
+    monkeypatch.setattr(analysis, "call_ollama_structured", fake_call_ollama_structured_malformed_json)
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "ollama"})
     assert r.status_code == 502
 
@@ -151,7 +152,7 @@ def test_analyze_structured_ollama_malformed_json_maps_to_502(monkeypatch):
 def test_analyze_structured_fails_validation_maps_to_502(monkeypatch):
     bad_result = {"score": 150, "matched": [], "missing": [], "suggestions": []}
     monkeypatch.setattr(
-        main, "call_anthropic_structured",
+        analysis, "call_anthropic_structured",
         lambda req: FakeMessage([FakeContentBlock(input=bad_result)]),
     )
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "anthropic"})
