@@ -2,8 +2,12 @@ import httpx
 import anthropic
 import pytest
 from fastapi.testclient import TestClient
+
 import main
-from main import app, extract_json_object, ollama_payload, require_inputs, AnalyzeRequest, StructuredAnalysis
+from main import app
+from models import AnalyzeRequest, StructuredAnalysis
+from errors import require_inputs
+from providers.ollama_provider import extract_json_object, ollama_payload
 
 client = TestClient(app)
 

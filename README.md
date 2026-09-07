@@ -4,7 +4,7 @@ An AI service that scores a CV against a job listing and returns a structured ma
  
 Built to explore the parts of LLM product engineering that are actually difficult to structure and execute: routing between providers, getting reliable structured output out of a model, and streaming a partially-formed response to a UI without it exposing the UI to unwanted visual artifacts.
  
-![Demo](docs/CV-analyzer.png)
+![Demo](docs/cv-analyzer.png)
  
 ## What it does
  
@@ -22,6 +22,132 @@ Two services, plus a local model that stays on the host.
 - **Backend** — FastAPI. Handles provider routing, structured-output enforcement, streaming, and PDF text extraction. Runs in a container.
 - **Frontend** — React + TypeScript, built with Vite, served by nginx. Runs in a container.
 - **Ollama** — the local model provider. Runs **on the host, not in a container**, because the model needs GPU access. The backend reaches it via `host.docker.internal`.
+
+## Job matching with retrieval (RAG)
+
+The analyze endpoints answer "how well does this CV fit *this* listing?" The `/match`
+endpoint answers a different question: **"out of every listing we know about, which ones
+should this CV go after?"** The user supplies only a CV, and retrieval picks the candidates.
+
+### How it works
+
+**Indexing (offline).** Each job listing is split into paragraph sized chunks. Every chunk
+is embedded with `nomic-embed-text` running locally through Ollama, producing a 768
+dimensional vector, and stored in Postgres with the pgvector extension. The parent listing
+keeps its full text; chunks reference it by foreign key.
+
+**Retrieval (per request).** The incoming CV is embedded with the same model, then compared
+against the stored chunk vectors using cosine distance (`<=>`). Results are deduplicated by
+parent listing with `DISTINCT ON`, so one posting cannot occupy several slots in the
+shortlist, and the parent's full text is returned rather than the matching fragment.
+
+**Generation.** Each retrieved listing goes through the existing structured analysis path,
+concurrently via `asyncio.gather`. The response is a ranked list: company, title, cosine
+distance, and the same `StructuredAnalysis` (score, matched, missing, suggestions) the
+single listing endpoint produces.
+
+The division of labour is the point of RAG: vector search is cheap and narrows a corpus to a
+handful of candidates, and the expensive model call runs only on what survived.
+
+### Chunking, and why
+
+The first version embedded each listing as a single vector. It did not work. Querying a
+corpus of six postings with *"building applications that use large language models"*
+returned everything within 0.018 of everything else, with a scientific computing role
+ranked second:
+
+```
+0.4288  Playtech            AI Engineer
+0.4347  ICT Strypes         Python Software Engineer, ASML
+0.4388  KBC Global Services Python Developer, M365 Integration
+0.4424  Fastmarkets         AI Engineer
+0.4464  Trading 212         DevOps Engineer
+```
+
+A job posting is not about one thing. Averaging responsibilities, requirements, benefits and
+company boilerplate into a single vector produces "a job posting about software," which
+every posting resembles. The distinguishing content is real but it is diluted by the shared
+generic mass around it.
+
+Chunking by paragraph fixed it. The requirements section of each listing becomes its own
+vector, dense with the vocabulary that actually distinguishes it:
+
+```
+0.3596  Playtech            AI Engineer
+0.4092  Fastmarkets         AI Engineer
+0.4135  KBC Global Services Python Developer, M365 Integration
+0.4226  ICT Strypes         Python Software Engineer, ASML
+0.4518  Trading 212         DevOps Engineer
+```
+
+The three AI roles now take the top three, and the spread widened from 0.018 to 0.09.
+
+The tradeoff is the usual one: chunks too large and retrieval is imprecise, chunks too small
+and a requirement gets separated from the context that gives it meaning. Splitting on
+paragraph boundaries respects the structure the documents already have, which beats fixed
+character counts on this corpus.
+
+### Verifying retrieval
+
+The seed corpus is deliberately mixed: AI and Python roles, one general software role, one
+scientific computing role, one infrastructure role. That variety is what makes the behaviour
+testable rather than merely plausible, since cosine distance always returns *something*.
+
+Two queries that share almost no vocabulary with their target still resolve cleanly:
+
+| Query | Top result | Distance | Gap to second |
+|---|---|---|---|
+| debugging memory issues in C and C++ with low level tools | ICT Strypes (ASML) | 0.454 | decisive over the AI roles |
+| keeping infrastructure running, incidents and monitoring | Trading 212 (DevOps) | 0.322 | 0.14 |
+
+Neither query contains "Valgrind", "GDB", "Terraform" or "Kubernetes". Keyword search would
+have missed both.
+
+### Schema
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE listings (
+    id      SERIAL PRIMARY KEY,
+    company TEXT,
+    title   TEXT,
+    text    TEXT NOT NULL,
+    UNIQUE (company, title)
+);
+
+CREATE TABLE chunks (
+    id           SERIAL PRIMARY KEY,
+    listing_id   INTEGER REFERENCES listings(id) ON DELETE CASCADE,
+    chunk_index  INTEGER,
+    text         TEXT NOT NULL,
+    embedding    vector(768)
+);
+```
+
+Re-seeding upserts listings on `(company, title)` and replaces their chunks wholesale.
+Chunks are derived data whose boundaries shift when the chunking strategy changes, so
+matching old chunks to new ones by index would be meaningless.
+
+### Running it
+
+```bash
+docker compose up -d db        # Postgres with pgvector
+ollama pull nomic-embed-text   # embedding model, runs locally
+python seed.py                 # index the corpus
+docker compose up --build backend frontend
+```
+
+Then choose **Find matching jobs**, paste a CV, and submit.
+
+### Known limits
+
+Embeddings are model specific: vectors from different embedding models are not comparable,
+so changing the model means re-indexing the whole corpus. Retrieval has no distance
+threshold, so an unrelated CV still returns the nearest listings rather than an empty
+result. And retrieval quality caps generation quality, since the model can only reason over
+the passages it is given.
+
 ### Provider routing
  
 A single `provider` field on the request switches the backend between two model backends:

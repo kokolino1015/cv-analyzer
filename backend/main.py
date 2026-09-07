@@ -1,26 +1,24 @@
 import os
-from contextlib import contextmanager
+import asyncio
 
-import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
-from pypdf import PdfReader
-import anthropic
-from typing import Literal
-import json
 from fastapi.responses import StreamingResponse
+from dotenv import load_dotenv
+from pypdf import PdfReader
+
+from errors import require_inputs, translate_provider_errors
+from models import AnalyzeRequest, StructuredAnalysis, AnalyzeResponse, UploadResponse, MatchRequest
+from analysis import analyze_one
+from retrieval import search
+from providers.anthropic_provider import call_anthropic, call_anthropic_stream, call_anthropic_structured_stream
+from providers.ollama_provider import call_ollama, call_ollama_stream, call_ollama_structured_stream
 
 load_dotenv()
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
-OLLAMA_MODEL = "gemma3:27b"
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 app = FastAPI(title="CV Analyzer")
-client = anthropic.Anthropic()
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,195 +28,9 @@ app.add_middleware(
 )
 
 
-class StructuredAnalysis(BaseModel):
-    score: int = Field(ge=0, le=100)
-    matched: list[str]
-    missing: list[str]
-    suggestions: list[str]
-
-
-class UploadResponse(BaseModel):
-    text: str
-
-
-class AnalyzeRequest(BaseModel):
-    cv_text: str
-    job_listing: str
-    provider: Literal["anthropic", "ollama"] = "anthropic"
-
-
-class AnalyzeResponse(BaseModel):
-    analysis: str
-
-
-def task_prompt(req: AnalyzeRequest) -> str:
-    return (
-        "Compare this CV against this job listing.\n"
-        "Identify: 1) matched requirements, 2) missing requirements, "
-        "3) a match score 0-100, 4) two concrete suggestions to improve the match.\n\n"
-        f"CV:\n{req.cv_text}\n\nJOB LISTING:\n{req.job_listing}"
-    )
-
-
-def json_prompt(req: AnalyzeRequest) -> str:
-    return (
-        "Respond with ONLY a valid JSON object — no markdown, no code fences, no text "
-        'before or after — in exactly this structure: {"score": <integer 0-100>, '
-        '"matched": [<strings>], "missing": [<strings>], "suggestions": [<strings>]}.\n\n'
-        + task_prompt(req)
-    )
-
-
-def require_inputs(req: AnalyzeRequest) -> None:
-    if not req.cv_text.strip() or not req.job_listing.strip():
-        raise HTTPException(status_code=400, detail="Both cv_text and job_listing are required")
-
-
-@contextmanager
-def translate_provider_errors():
-    try:
-        yield
-    except anthropic.APIError as e:
-        raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Ollama unreachable: {e}")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"Ollama answered with an error: {e}")
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
-def call_anthropic(prompt: AnalyzeRequest):
-    return client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=1500,
-        messages=[{"role": "user", "content": task_prompt(prompt)}],
-    )
-
-
-def call_anthropic_structured(prompt: AnalyzeRequest):
-    return client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=1500,
-        temperature=0,
-        tools=[{
-            "name": "submit_analysis",
-            "description": "Submit the CV-vs-listing analysis result",
-            "input_schema": StructuredAnalysis.model_json_schema(),
-        }],
-        tool_choice={"type": "tool", "name": "submit_analysis"},
-        messages=[{"role": "user", "content": task_prompt(prompt)}],
-    )
-
-
-async def call_anthropic_stream(prompt: AnalyzeRequest):
-    try:
-        with client.messages.stream(
-                model=ANTHROPIC_MODEL,
-                max_tokens=1500,
-                messages=[{"role": "user", "content": task_prompt(prompt)}],
-        ) as stream:
-            for text in stream.text_stream:
-                yield text
-    except Exception as e:
-        yield f"\n\n[ERROR: {e}]"
-
-
-async def call_anthropic_structured_stream(prompt: AnalyzeRequest):
-    try:
-        with client.messages.stream(
-            model=ANTHROPIC_MODEL,
-            max_tokens=1500,
-            temperature=0,
-            tools=[{
-                "name": "submit_analysis",
-                "description": "Submit the CV-vs-listing analysis result",
-                "input_schema": StructuredAnalysis.model_json_schema(),
-            }],
-            tool_choice={"type": "tool", "name": "submit_analysis"},
-            messages=[{"role": "user", "content": task_prompt(prompt)}],
-        ) as stream:
-            for event in stream:
-                if event.type == "content_block_delta" and event.delta.type == "input_json_delta":
-                    yield event.delta.partial_json
-    except Exception as e:
-        yield f"\n\n[ERROR: {e}]"
-
-
-def ollama_payload(content: str, *, stream: bool = False, structured: bool = False,
-                    temperature: float | None = None) -> dict:
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [{"role": "user", "content": content}],
-        "stream": stream,
-    }
-    if structured:
-        payload["format"] = StructuredAnalysis.model_json_schema()
-    if temperature is not None:
-        payload["options"] = {"temperature": temperature}
-    return payload
-
-
-async def ollama_chat(payload: dict) -> dict:
-    async with httpx.AsyncClient() as ollama:
-        response = await ollama.post(OLLAMA_URL, json=payload, timeout=120.0)
-    response.raise_for_status()
-    return response.json()
-
-
-async def ollama_stream(payload: dict):
-    async with httpx.AsyncClient() as ollama:
-        async with ollama.stream("POST", OLLAMA_URL, json=payload, timeout=120.0) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line.strip():
-                    yield json.loads(line)["message"]["content"]
-
-
-async def call_ollama(prompt: AnalyzeRequest) -> dict:
-    return await ollama_chat(ollama_payload(task_prompt(prompt)))
-
-
-async def call_ollama_structured(prompt: AnalyzeRequest) -> dict:
-    return await ollama_chat(ollama_payload(json_prompt(prompt), structured=True))
-
-
-async def call_ollama_stream(prompt: AnalyzeRequest):
-    try:
-        async for chunk in ollama_stream(ollama_payload(task_prompt(prompt), stream=True, temperature=0.1)):
-            yield chunk
-    except httpx.HTTPError as e:
-        yield f"\n\n[ERROR: {e}]"
-
-
-async def call_ollama_structured_stream(prompt: AnalyzeRequest):
-    try:
-        async for chunk in ollama_stream(ollama_payload(json_prompt(prompt), stream=True, structured=True)):
-            yield chunk
-    except httpx.HTTPError as e:
-        yield f"\n\n[ERROR: {e}]"
-
-
-def extract_json_object(raw: str) -> dict:
-    start, end = raw.find("{"), raw.rfind("}")
-    if start == -1 or end == -1:
-        raise HTTPException(status_code=502, detail=f"No JSON in model output: {raw[:200]!r}")
-    return json.loads(raw[start:end + 1])
-
-
-@app.post("/analyze_stream")
-async def analyze_stream(req: AnalyzeRequest):
-    require_inputs(req)
-
-    if req.provider == "anthropic":
-        response = call_anthropic_stream(req)
-    else:
-        response = call_ollama_stream(req)
-
-    return StreamingResponse(response, media_type="text/plain")
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
@@ -231,28 +43,23 @@ async def analyze(req: AnalyzeRequest):
         else:
             response = await call_ollama(req)
             text = response["message"]["content"]
-
     return AnalyzeResponse(analysis=text)
 
 
 @app.post("/analyze_structured", response_model=StructuredAnalysis)
 async def analyze_structured(req: AnalyzeRequest):
     require_inputs(req)
-    with translate_provider_errors():
-        try:
-            if req.provider == "anthropic":
-                message = call_anthropic_structured(req)
-                parsed = message.content[0].input
-            else:
-                response = await call_ollama_structured(req)
-                parsed = extract_json_object(response["message"]["content"])
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=502, detail=f"Malformed model output: {e}")
+    return await analyze_one(req.cv_text, req.job_listing, req.provider)
 
-    try:
-        return StructuredAnalysis(**parsed)
-    except ValueError as e:
-        raise HTTPException(status_code=502, detail=f"Model output failed validation: {e}")
+
+@app.post("/analyze_stream")
+async def analyze_stream(req: AnalyzeRequest):
+    require_inputs(req)
+    if req.provider == "anthropic":
+        gen = call_anthropic_stream(req)
+    else:
+        gen = call_ollama_stream(req)
+    return StreamingResponse(gen, media_type="text/plain")
 
 
 @app.post("/analyze_structured_stream")
@@ -265,6 +72,31 @@ async def analyze_structured_stream(req: AnalyzeRequest):
     return StreamingResponse(gen, media_type="text/plain")
 
 
+@app.post("/match")
+async def match(req: MatchRequest):
+    if not req.cv_text.strip():
+        raise HTTPException(status_code=400, detail="cv_text is required")
+
+    matches = search(req.cv_text, top_k=req.top_k)
+    if not matches:
+        return []
+
+    analyses = await asyncio.gather(*[
+        analyze_one(req.cv_text, listing_text, req.provider)
+        for _company, _title, listing_text, _distance in matches
+    ])
+
+    return [
+        {
+            "company": company,
+            "title": title,
+            "distance": distance,
+            "analysis": analysis,
+        }
+        for (company, title, _text, distance), analysis in zip(matches, analyses)
+    ]
+
+
 @app.post("/upload_cv", response_model=UploadResponse)
 async def upload_cv(file: UploadFile = File(...)):
     if file.content_type != "application/pdf":
@@ -273,10 +105,10 @@ async def upload_cv(file: UploadFile = File(...)):
         reader = PdfReader(file.file)
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
     except Exception:
-        raise HTTPException(status_code=400, detail="Could not read PDF — file may be corrupted")
+        raise HTTPException(status_code=400, detail="Could not read PDF, the file may be corrupted")
     if not text.strip():
         raise HTTPException(
             status_code=400,
-            detail="No text found — the PDF may be scanned images (OCR not supported)",
+            detail="No text found, the PDF may be scanned images (OCR not supported)",
         )
     return UploadResponse(text=text)

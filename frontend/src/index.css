@@ -9,9 +9,17 @@ body {
 }
 
 .container {
-  max-width: 860px;
-  margin: 0 auto;
-  padding: 48px 24px;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 2rem;
+    min-width: 0;
+}
+
+.controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-end;
 }
 
 h1 {
@@ -123,13 +131,6 @@ button:disabled {
 .file-btn:hover {
   border-color: #6366f1;
   color: #c7d2fe;
-}
-
-.controls {
-  display: flex;
-  align-items: flex-end;
-  gap: 16px;
-  margin-top: 8px;
 }
 
 .provider-field label {

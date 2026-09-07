@@ -11,7 +11,15 @@ interface StructuredAnalysis {
     suggestions: string[];
 }
 
-class ApiError extends Error {}
+interface Match {
+    company: string;
+    title: string;
+    distance: number;
+    analysis: StructuredAnalysis;
+}
+
+class ApiError extends Error {
+}
 
 function ScoreBadge({score}: { score: number }) {
     const color = score >= 70 ? "#22c55e" : score >= 40 ? "#f59e0b" : "#ef4444";
@@ -58,27 +66,46 @@ function App() {
     const [cvText, setCvText] = useState("");
     const [jobListing, setJobListing] = useState("");
     const [structuredOutput, setStructuredOutput] = useState<Partial<StructuredAnalysis> | null>(null);
+    const [matches, setMatches] = useState<Match[] | null>(null);
     const [result, setResult] = useState("");
     const [loading, setLoading] = useState(false);
     const [provider, setProvider] = useState("anthropic");
     const [stream, setStream] = useState("stream");
     const [structured, setStructured] = useState("structured");
+    const [mode, setMode] = useState("analyze");
+    const [topK, setTopK] = useState(3);
     const baseURL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
     const emptyOutput = () => {
         setLoading(true);
         setResult("");
         setStructuredOutput(null);
+        setMatches(null);
     }
 
-    const postAnalyze = async (path: string): Promise<Response> => {
+    const post = async (path: string, body: object): Promise<Response> => {
         const res = await fetch(baseURL + path, {
             method: "POST",
             headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({cv_text: cvText, job_listing: jobListing, provider: provider}),
+            body: JSON.stringify(body),
         });
         if (!res.ok) throw new ApiError(await extractErrorMessage(res));
         return res;
+    };
+
+    const postAnalyze = (path: string): Promise<Response> =>
+        post(path, {cv_text: cvText, job_listing: jobListing, provider: provider});
+
+    const findMatches = async () => {
+        emptyOutput();
+        try {
+            const res = await post("/match", {cv_text: cvText, provider: provider, top_k: topK});
+            setMatches(await res.json());
+        } catch (e) {
+            setResult(e instanceof ApiError ? e.message : "Network error, is the backend running?");
+        } finally {
+            setLoading(false);
+        }
     };
 
     const analyze = async () => {
@@ -88,7 +115,7 @@ function App() {
             const data: AnalyzeResponse = await res.json();
             setResult(data.analysis);
         } catch (e) {
-            setResult(e instanceof ApiError ? e.message : "Network error — is the backend running?");
+            setResult(e instanceof ApiError ? e.message : "Network error, is the backend running?");
         } finally {
             setLoading(false);
         }
@@ -101,7 +128,7 @@ function App() {
             const data: StructuredAnalysis = await res.json();
             setStructuredOutput(data);
         } catch (e) {
-            setResult(e instanceof ApiError ? e.message : "Network error — is the backend running?");
+            setResult(e instanceof ApiError ? e.message : "Network error, is the backend running?");
         } finally {
             setLoading(false);
         }
@@ -181,7 +208,6 @@ function App() {
             const parsed = JSON.parse(buffer);
             setStructuredOutput(parsed);
         } catch {
-            // buffer is still an incomplete JSON fragment — ignore and wait for more chunks
         }
     }
 
@@ -205,25 +231,34 @@ function App() {
             const data: { text: string } = await res.json();
             setCvText(data.text);
         } catch {
-            setCvText("Network error — is the backend running?");
+            setCvText("Network error, is the backend running?");
         } finally {
             setLoading(false);
         }
     };
 
-    const manageQuery = () =>
-        stream == "stream" && structured == "structured"
+    const manageQuery = () => {
+        if (mode === "match") return findMatches();
+        return stream == "stream" && structured == "structured"
             ? analyzeStructuredStream()
             : stream == "stream" && structured == "notStructured"
                 ? analyzeStream()
                 : stream == "noStream" && structured == "structured"
                     ? analyzeStructured()
                     : analyze();
+    };
+
+    const isMatchMode = mode === "match";
+    const canSubmit = isMatchMode ? !!cvText : !!cvText && !!jobListing;
 
     return (
         <div className="container">
             <h1>CV Analyzer</h1>
-            <p className="subtitle">Paste a CV and a job listing — get an AI match analysis.</p>
+            <p className="subtitle">
+                {isMatchMode
+                    ? "Paste a CV and find the closest job listings from the indexed corpus."
+                    : "Paste a CV and a job listing to get an AI match analysis."}
+            </p>
 
             <div className="inputs">
                 <div className="field">
@@ -235,20 +270,29 @@ function App() {
                     />
                     <input type="file" id="cv-file" accept=".pdf" onChange={uploadCv} hidden/>
                     <label htmlFor="cv-file" className="file-btn">
-                        📄 Upload PDF
+                        Upload PDF
                     </label>
                 </div>
-                <div className="field">
-                    <label>Job listing</label>
-                    <textarea
-                        placeholder="Paste the job listing..."
-                        value={jobListing}
-                        onChange={(e) => setJobListing(e.target.value)}
-                    />
-                </div>
+                {!isMatchMode && (
+                    <div className="field">
+                        <label>Job listing</label>
+                        <textarea
+                            placeholder="Paste the job listing..."
+                            value={jobListing}
+                            onChange={(e) => setJobListing(e.target.value)}
+                        />
+                    </div>
+                )}
             </div>
 
             <div className="controls">
+                <div className="provider-field">
+                    <label htmlFor="mode">Mode</label>
+                    <select id="mode" value={mode} onChange={(e) => setMode(e.target.value)}>
+                        <option value="analyze">Analyze against a listing</option>
+                        <option value="match">Find matching jobs</option>
+                    </select>
+                </div>
                 <div className="provider-field">
                     <label htmlFor="provider">Provider</label>
                     <select
@@ -260,31 +304,46 @@ function App() {
                         <option value="ollama">Local (Ollama)</option>
                     </select>
                 </div>
-                <div className="provider-field">
-                    <label htmlFor="stream">Stream</label>
-                    <select
-                        id="stream"
-                        value={stream}
-                        onChange={(e) => setStream(e.target.value)}
-                    >
-                        <option value="stream">Stream</option>
-                        <option value="noStream">No stream</option>
-                    </select>
-                </div>
-                <div className="provider-field">
-                    <label htmlFor="structured">Output</label>
-                    <select
-                        id="structured"
-                        value={structured}
-                        onChange={(e) => setStructured(e.target.value)}
-                    >
-                        <option value="structured">Structured</option>
-                        <option value="notStructured">Not structured</option>
-                    </select>
-                </div>
-                <button onClick={manageQuery}
-                        disabled={loading || !cvText || !jobListing}>
-                    {loading ? "Analyzing..." : "Analyze"}
+
+                {isMatchMode ? (
+                    <div className="provider-field">
+                        <label htmlFor="topK">Results</label>
+                        <select id="topK" value={topK} onChange={(e) => setTopK(Number(e.target.value))}>
+                            <option value={3}>3</option>
+                            <option value={5}>5</option>
+                        </select>
+                    </div>
+                ) : (
+                    <>
+                        <div className="provider-field">
+                            <label htmlFor="stream">Stream</label>
+                            <select
+                                id="stream"
+                                value={stream}
+                                onChange={(e) => setStream(e.target.value)}
+                            >
+                                <option value="stream">Stream</option>
+                                <option value="noStream">No stream</option>
+                            </select>
+                        </div>
+                        <div className="provider-field">
+                            <label htmlFor="structured">Output</label>
+                            <select
+                                id="structured"
+                                value={structured}
+                                onChange={(e) => setStructured(e.target.value)}
+                            >
+                                <option value="structured">Structured</option>
+                                <option value="notStructured">Not structured</option>
+                            </select>
+                        </div>
+                    </>
+                )}
+
+                <button onClick={manageQuery} disabled={loading || !canSubmit}>
+                    {loading
+                        ? (isMatchMode ? "Searching..." : "Analyzing...")
+                        : (isMatchMode ? "Find matching jobs" : "Analyze")}
                 </button>
             </div>
 
@@ -294,6 +353,7 @@ function App() {
                     <pre>{result}</pre>
                 </div>
             )}
+
             {structuredOutput && (
                 <div className="result">
                     <h2>Structured Analysis</h2>
@@ -305,6 +365,27 @@ function App() {
                     <RequirementList title="Suggestions" items={structuredOutput.suggestions ?? []} variant="good"/>
                 </div>
             )}
+
+            {matches && matches.length === 0 && (
+                <div className="result">
+                    <p>No matching listings found.</p>
+                </div>
+            )}
+
+            {matches && matches.map((m, i) => (
+                <div className="result" key={i}>
+                    <h2>{m.company}</h2>
+                    <p className="subtitle">
+                        {m.title} &nbsp;|&nbsp; similarity distance {m.distance.toFixed(3)}
+                    </p>
+                    <ScoreBadge score={m.analysis.score}/>
+                    <div className="req-columns">
+                        <RequirementList title="Matched" items={m.analysis.matched} variant="good"/>
+                        <RequirementList title="Missing" items={m.analysis.missing} variant="bad"/>
+                    </div>
+                    <RequirementList title="Suggestions" items={m.analysis.suggestions} variant="good"/>
+                </div>
+            ))}
         </div>
     );
 }
