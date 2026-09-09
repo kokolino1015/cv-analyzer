@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from pypdf import PdfReader
 
-from errors import require_inputs, translate_provider_errors
+from errors import require_inputs, translate_provider_errors, translate_retrieval_errors
 from models import AnalyzeRequest, StructuredAnalysis, AnalyzeResponse, UploadResponse, MatchRequest
 from analysis import analyze_one
 from retrieval import search
@@ -77,7 +77,9 @@ async def match(req: MatchRequest):
     if not req.cv_text.strip():
         raise HTTPException(status_code=400, detail="cv_text is required")
 
-    matches = search(req.cv_text, top_k=req.top_k)
+    with translate_retrieval_errors():
+        matches = search(req.cv_text, top_k=req.top_k)
+
     if not matches:
         return []
 

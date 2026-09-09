@@ -1,4 +1,6 @@
 from contextlib import contextmanager
+
+import psycopg
 from fastapi import HTTPException
 
 import anthropic
@@ -27,3 +29,15 @@ def translate_provider_errors():
         raise HTTPException(status_code=503, detail=f"Ollama unreachable: {e}")
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=502, detail=f"Ollama answered with an error: {e}")
+
+
+@contextmanager
+def translate_retrieval_errors():
+    try:
+        yield
+    except psycopg.OperationalError as e:
+        raise HTTPException(status_code=503, detail=f"Database unreachable: {e}")
+    except httpx.ConnectError as e:
+        raise HTTPException(status_code=503, detail=f"Embedding service unreachable: {e}")
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"Embedding service error: {e}")
