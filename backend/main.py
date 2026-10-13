@@ -38,7 +38,7 @@ async def analyze(req: AnalyzeRequest):
     require_inputs(req)
     with translate_provider_errors():
         if req.provider == "anthropic":
-            message = call_anthropic(req)
+            message = await call_anthropic(req)
             text = message.content[0].text
         else:
             response = await call_ollama(req)
@@ -78,7 +78,7 @@ async def match(req: MatchRequest):
         raise HTTPException(status_code=400, detail="cv_text is required")
 
     with translate_retrieval_errors():
-        matches = search(req.cv_text, top_k=req.top_k)
+        matches = await asyncio.to_thread(search, req.cv_text, top_k=req.top_k)
 
     if not matches:
         return []

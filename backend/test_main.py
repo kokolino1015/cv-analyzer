@@ -30,18 +30,24 @@ def fake_request():
     return httpx.Request("POST", "https://api.example.com")
 
 
-def raising_anthropic_error(*_args, **_kwargs):
+async def raising_anthropic_error(*_args, **_kwargs):
     raise anthropic.APIError("boom", fake_request(), body=None)
 
 
-def raising_ollama_unreachable(*_args, **_kwargs):
+async def raising_ollama_unreachable(*_args, **_kwargs):
     raise httpx.RequestError("connection refused")
 
 
-def raising_ollama_http_error(*_args, **_kwargs):
+async def raising_ollama_http_error(*_args, **_kwargs):
     request = fake_request()
     response = httpx.Response(500, request=request)
     raise httpx.HTTPStatusError("server error", request=request, response=response)
+
+
+def returns(value):
+    async def fake(*args, **kwargs):
+        return value
+    return fake
 
 
 def test_health():
@@ -69,7 +75,7 @@ def test_require_inputs_passes_for_valid_request():
 
 
 def test_analyze_anthropic_success(monkeypatch):
-    monkeypatch.setattr(main, "call_anthropic", lambda req: FakeMessage([FakeContentBlock(text="Good match.")]))
+    monkeypatch.setattr(main, "call_anthropic", returns(FakeMessage([FakeContentBlock(text="Good match.")])))
     r = client.post("/analyze", json={**VALID_BODY, "provider": "anthropic"})
     assert r.status_code == 200
     assert r.json() == {"analysis": "Good match."}
@@ -110,7 +116,7 @@ STRUCTURED_RESULT = {"score": 85, "matched": ["Python"], "missing": ["AWS"], "su
 def test_analyze_structured_anthropic_success(monkeypatch):
     monkeypatch.setattr(
         analysis, "call_anthropic_structured",
-        lambda req: FakeMessage([FakeContentBlock(input=STRUCTURED_RESULT)]),
+        returns(FakeMessage([FakeContentBlock(input=STRUCTURED_RESULT)])),
     )
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "anthropic"})
     assert r.status_code == 200
@@ -153,7 +159,7 @@ def test_analyze_structured_fails_validation_maps_to_502(monkeypatch):
     bad_result = {"score": 150, "matched": [], "missing": [], "suggestions": []}
     monkeypatch.setattr(
         analysis, "call_anthropic_structured",
-        lambda req: FakeMessage([FakeContentBlock(input=bad_result)]),
+        returns(FakeMessage([FakeContentBlock(input=bad_result)])),
     )
     r = client.post("/analyze_structured", json={**VALID_BODY, "provider": "anthropic"})
     assert r.status_code == 502

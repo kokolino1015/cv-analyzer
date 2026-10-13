@@ -1,12 +1,11 @@
-import asyncio
 import json
 
 from fastapi import HTTPException
 
 from errors import translate_provider_errors
 from models import StructuredAnalysis, AnalyzeRequest
-from providers.anthropic_provider import call_anthropic_structured, call_anthropic
-from providers.ollama_provider import call_ollama_structured, extract_json_object, call_ollama
+from providers.anthropic_provider import call_anthropic_structured
+from providers.ollama_provider import call_ollama_structured, extract_json_object
 
 
 async def analyze_one(cv_text: str, listing_text: str, provider: str) -> StructuredAnalysis:
@@ -14,7 +13,7 @@ async def analyze_one(cv_text: str, listing_text: str, provider: str) -> Structu
     with translate_provider_errors():
         try:
             if provider == "anthropic":
-                message = await asyncio.to_thread(call_anthropic_structured, req)
+                message = await call_anthropic_structured(req)
                 parsed = message.content[0].input
             else:
                 response = await call_ollama_structured(req)

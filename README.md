@@ -1,6 +1,6 @@
 # CV Analyzer
  
-An AI service that scores a CV against a job listing and returns a structured match analysis - a score, matched requirements, gaps in your CV, and concrete suggestions.
+An AI service that scores a CV against a job listing and returns a structured match analysis: a score, matched requirements, gaps in your CV, and concrete suggestions.
  
 Built to explore the parts of LLM product engineering that are actually difficult to structure and execute: routing between providers, getting reliable structured output out of a model, and streaming a partially-formed response to a UI without it exposing the UI to unwanted visual artifacts.
  
@@ -8,7 +8,7 @@ Built to explore the parts of LLM product engineering that are actually difficul
  
 ## What it does
  
-Paste a CV and a job listing (or upload the CV as a PDF), pick a provider and output mode, and receive your analysis. The interesting part is *how* the analysis is produced - the app supports four combinations across two providers, and each combination exercises a different technical path.
+Paste a CV and a job listing (or upload the CV as a PDF), pick a provider and output mode, and receive your analysis. The interesting part is *how* the analysis is produced: the app supports four combinations across two providers, and each combination exercises a different technical path.
  
 | | Not structured | Structured |
 |---|---|---|
@@ -19,9 +19,9 @@ Paste a CV and a job listing (or upload the CV as a PDF), pick a provider and ou
  
 Two services, plus a local model that stays on the host.
  
-- **Backend** — FastAPI. Handles provider routing, structured-output enforcement, streaming, and PDF text extraction. Runs in a container.
-- **Frontend** — React + TypeScript, built with Vite, served by nginx. Runs in a container.
-- **Ollama** — the local model provider. Runs **on the host, not in a container**, because the model needs GPU access. The backend reaches it via `host.docker.internal`.
+- **Backend:** FastAPI. Handles provider routing, structured-output enforcement, streaming, retrieval and PDF text extraction. Fully async: model calls are awaited on the event loop. Runs in a container.
+- **Frontend:** React + TypeScript, built with Vite, served by nginx. Runs in a container.
+- **Ollama:** the local model provider. Runs **on the host, not in a container**, because the model needs GPU access. The backend reaches it via `host.docker.internal`.
 
 ## Job matching with retrieval (RAG)
 
@@ -42,7 +42,8 @@ parent listing with `DISTINCT ON`, so one posting cannot occupy several slots in
 shortlist, and the parent's full text is returned rather than the matching fragment.
 
 **Generation.** Each retrieved listing goes through the existing structured analysis path,
-concurrently via `asyncio.gather`. The response is a ranked list: company, title, cosine
+concurrently via `asyncio.gather` (see "Async all the way down" for why that only became
+true concurrency later). The response is a ranked list: company, title, cosine
 distance, and the same `StructuredAnalysis` (score, matched, missing, suggestions) the
 single listing endpoint produces.
 
@@ -152,30 +153,46 @@ the passages it is given.
  
 A single `provider` field on the request switches the backend between two model backends:
  
-- **Anthropic** — via the official SDK.
-- **Ollama** — a locally hosted model via its HTTP API.
+- **Anthropic:** via the official SDK's async client (`AsyncAnthropic`).
+- **Ollama:** a locally hosted model via its HTTP API.
+
 The two providers have different failure modes, so the backend keeps an explicit error taxonomy rather than collapsing everything into a 500:
  
-- `400` — bad client input (missing CV or job listing).
-- `502` — the model returned output that couldn't be parsed or validated.
-- `503` — the local provider (Ollama) is unreachable.
-This means a bad prompt, a malformed model response, and a dead provider are never confused with one another — which matters when you're debugging why a call failed.
+- `400`: bad client input (missing CV or job listing).
+- `502`: the model returned output that couldn't be parsed or validated.
+- `503`: a dependency is unreachable: the local provider (Ollama), the database, or the embedding service.
+
+This means a bad prompt, a malformed model response, and a dead provider are never confused with one another, which matters when you're debugging why a call failed.
  
+### Async all the way down
+
+Model calls are I/O: the backend spends most of each request waiting for Anthropic or Ollama. FastAPI runs every request on one event loop, so anything that waits without `await` freezes all of them.
+
+- **The bug.** The first version wrapped the synchronous Anthropic client in `async def`. It looked asynchronous but wasn't: each call held the event loop, so `asyncio.gather` in `/match` ran the five analyses one after another. **42 s.**
+- **The workaround.** `asyncio.to_thread` moved each call to a worker thread, freeing the loop. **16 s**, timed by hand.
+- **The fix.** The provider now uses `AsyncAnthropic`. Calls are `return await client.messages.create(...)`, streams use `async with` and `async for`, and `analyze_one` awaits the provider directly, with no thread per call.
+- **What is still sync.** Retrieval uses a synchronous database driver, so `/match` runs `search()` through `asyncio.to_thread` to keep the loop free.
+
+**Tests** use FastAPI's `TestClient`, which runs the event loop itself, so the test functions stay synchronous. What changed is the fakes: every fake for an awaited function is now async (a small `returns(value)` helper builds them, and error fakes are `async def` functions that raise), and the stream fakes are async generators. The error-mapping tests still prove the 502/503 taxonomy, because a failure now surfaces at the `await` inside `translate_provider_errors()`, exactly where the real client fails.
+
 ### Structured output
  
 Getting a model to reliably return JSON that matches a schema is done differently per provider, but both are driven by a **single Pydantic model** so there's one source of truth:
  
-- **Anthropic** — forced tool use. The model is given a tool whose input schema *is* the Pydantic schema, and is required to call it, so the response is shaped by the schema rather than hoping the prose contains valid JSON.
-- **Ollama** — JSON-schema-constrained generation. The same Pydantic schema is passed as a format constraint, so the model's output is restricted to valid instances.
+- **Anthropic:** forced tool use. The model is given a tool whose input schema *is* the Pydantic schema, and is required to call it, so the response is shaped by the schema rather than hoping the prose contains valid JSON.
+- **Ollama:** JSON-schema-constrained generation. The same Pydantic schema is passed as a format constraint, so the model's output is restricted to valid instances.
+
 In both cases the response is **re-validated server-side against the same Pydantic model** before it reaches the client. The model's output is never trusted as-is.
  
 ### Streaming and partial-JSON assembly
  
-Both providers stream. Plain-text streaming is straightforward — tokens arrive, they're appended. Structured streaming is the harder problem: the JSON is incomplete on every chunk until the very last one, so it can't just be `JSON.parse`d as it arrives.
+Both providers stream. Plain-text streaming is simple: tokens arrive, they're appended. Structured streaming is the harder problem: the JSON is incomplete on every chunk until the very last one, so it can't just be `JSON.parse`d as it arrives.
  
-The frontend handles this by tracking bracket/quote depth as bytes stream in, closing any open structures to form a *valid* partial object, and parsing that — so the UI can render the score and matched requirements as they populate, mid-stream, rather than waiting for the whole response.
+The frontend handles this by tracking bracket/quote depth as bytes stream in, closing any open structures to form a *valid* partial object, and parsing that, so the UI can render the score and matched requirements as they populate, mid-stream, rather than waiting for the whole response.
+
+On the backend, both Anthropic streams are async generators (`async with client.messages.stream(...)` and `async for` over the events), which `StreamingResponse` consumes directly.
  
-> **Note on the parser:** the current approach is a hand-written depth tracker, which works but is all-or-nothing per chunk and has edge cases around escaped characters inside strings. The cleaner solution is NDJSON — have the backend emit one complete JSON object per line — which sidesteps partial-parsing entirely. That's the planned next step; the current version is kept because building it surfaced *why* NDJSON is the right answer.
+> **Note on the parser:** the current approach is a hand-written depth tracker, which works but is all-or-nothing per chunk and has edge cases around escaped characters inside strings. The cleaner solution is NDJSON: have the backend emit one complete JSON object per line, which sidesteps partial-parsing entirely. That's the planned next step; the current version is kept because building it surfaced *why* NDJSON is the right answer.
  
 ## Running it
  
@@ -244,4 +261,7 @@ Copy `.env.example` to `.env` and fill in your own values. `.env` is gitignored 
 - NDJSON streaming to replace the hand-written partial-JSON parser
 - Side-by-side comparison of both providers on the same input
 - Rate limiting and a spend cap, as prerequisites for a public deployment
-- Async Anthropic client
+- An async database driver for retrieval (today `search()` runs via `asyncio.to_thread`)
+- One shared `httpx.AsyncClient` for Ollama instead of one per call
+- Map Anthropic connection errors to 503 (they currently surface as 502, because the whole `anthropic.APIError` family is caught)
+- A test for `/match` itself
