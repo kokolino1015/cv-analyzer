@@ -170,10 +170,11 @@ Model calls are I/O: the backend spends most of each request waiting for Anthrop
 
 - **The bug.** The first version wrapped the synchronous Anthropic client in `async def`. It looked asynchronous but wasn't: each call held the event loop, so `asyncio.gather` in `/match` ran the five analyses one after another. **42 s.**
 - **The workaround.** `asyncio.to_thread` moved each call to a worker thread, freeing the loop. **16 s**, timed by hand.
-- **The fix.** The provider now uses `AsyncAnthropic`. Calls are `return await client.messages.create(...)`, streams use `async with` and `async for`, and `analyze_one` awaits the provider directly, with no thread per call.
+- **The fix.** The provider now uses `AsyncAnthropic`. Calls are `return await client.messages.create(...)`, streams use `async with` and `async for`, and `analyze_one` awaits the provider directly, with no thread per call. **About 14 s** on Anthropic. The gain over the workaround is small, as expected: threads had already made the calls concurrent, so the request now takes about as long as its slowest analysis. What async adds is that no thread is spent per waiting call.
+- **Ollama: about 18 s.** A local model serves requests largely one at a time (Ollama's `OLLAMA_NUM_PARALLEL`), so concurrency in the backend can't make the model itself faster.
 - **What is still sync.** Retrieval uses a synchronous database driver, so `/match` runs `search()` through `asyncio.to_thread` to keep the loop free.
 
-**Tests** use FastAPI's `TestClient`, which runs the event loop itself, so the test functions stay synchronous. What changed is the fakes: every fake for an awaited function is now async (a small `returns(value)` helper builds them, and error fakes are `async def` functions that raise), and the stream fakes are async generators. The error-mapping tests still prove the 502/503 taxonomy, because a failure now surfaces at the `await` inside `translate_provider_errors()`, exactly where the real client fails.
+**Tests** use FastAPI's `TestClient`, which runs the event loop itself, so the test functions stay synchronous. What changed is the fakes: every fake for an awaited function is now async (a small `returns(value)` helper builds them, and error fakes are `async def` functions that raise), and the stream fakes are async generators. The error-mapping tests still prove the 502/503 taxonomy, because a failure now surfaces at the `await` inside `translate_provider_errors()`, exactly where the real client fails. A `/match` test fakes both boundaries (`search` as a plain function, `analyze_one` as an async one that echoes its posting text into the result) and checks that each posting comes back paired with its own analysis, in order.
 
 ### Structured output
  

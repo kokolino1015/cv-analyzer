@@ -263,3 +263,28 @@ def test_ollama_payload_with_temperature_sets_options():
     payload = ollama_payload("hello", stream=True, temperature=0.1)
     assert payload["stream"] is True
     assert payload["options"] == {"temperature": 0.1}
+
+async def fake_analyze(cv_text, listing_text, provider):
+    return StructuredAnalysis(score=50, matched=[listing_text], missing=[], suggestions=[])
+
+
+def test_match(monkeypatch):
+    monkeypatch.setattr(main, "search", lambda cv_text, top_k: [
+        ("Acme", "Python Dev", "posting one", 0.1),
+        ("Beta", "Java Dev",   "posting two", 0.4),
+    ])
+    monkeypatch.setattr(main, "analyze_one", fake_analyze)
+
+    r = client.post("/match", json={**VALID_BODY, "provider": "ollama", "top_k": 3})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 2
+
+    assert body[0]["company"] == "Acme"
+    assert body[0]["analysis"]["matched"] == ["posting one"]
+
+    assert body[1]["company"] == "Beta"
+    assert body[1]["analysis"]["matched"] == ["posting two"]
+
+
