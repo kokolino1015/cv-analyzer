@@ -139,6 +139,8 @@ python seed.py                 # index the corpus
 docker compose up --build backend frontend
 ```
 
+**Shortcuts**: make up, make test, make help.
+
 Then choose **Find matching jobs**, paste a CV, and submit.
 
 ### Known limits
