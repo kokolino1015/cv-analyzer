@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: backend }
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: fastapiproject-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: postgresql://cv:cv@db:5432/cvanalyzer
+            - name: OLLAMA_URL
+              value: http://ollama:11434/api/chat
+            - name: OLLAMA_EMBED_URL
+              value: http://ollama:11434/api/embeddings
+          envFrom:
+            - secretRef:
+                name: backend-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
