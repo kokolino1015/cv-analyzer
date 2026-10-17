@@ -74,7 +74,7 @@ function App() {
     const [structured, setStructured] = useState("structured");
     const [mode, setMode] = useState("analyze");
     const [topK, setTopK] = useState(3);
-    const baseURL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+    const baseURL = "/api";
 
     const emptyOutput = () => {
         setLoading(true);
