@@ -1,4 +1,4 @@
-.PHONY: help up down logs test debug-db psql
+.PHONY: help up down logs test debug-db psql kind-up deploy
 PYTHON ?= .venv/bin/python
 
 help:
@@ -8,6 +8,17 @@ help:
 	@echo "test - runs the tests of the project"
 	@echo "debug-db - runs the frontend and db only"
 	@echo "psql - SQL prompt in the database"
+	@echo "kind-up  - create the kind cluster (if missing) and load images"
+	@echo "deploy   - apply all Kubernetes manifests in k8s/"
+
+kind-up:
+	kind get clusters | grep -qx cv || kind create cluster --name cv
+	docker compose build backend frontend
+	kind load docker-image fastapiproject-backend:latest --name cv
+	kind load docker-image fastapiproject-frontend:latest --name cv
+
+deploy:
+	kubectl apply -f k8s/
 
 up:
 	docker compose up -d --build

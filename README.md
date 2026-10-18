@@ -139,6 +139,78 @@ python seed.py                 # index the corpus
 docker compose up --build backend frontend
 ```
 
+## Running on Kubernetes (local, kind)
+
+The same images that run in Docker Compose also run on a local Kubernetes cluster created with [kind](https://kind.sigs.k8s.io/). The manifests are in `k8s/`.
+
+```
+k8s/
+  db.yaml        Postgres with pgvector: Secret, PersistentVolumeClaim, Deployment, Service
+  ollama.yaml    Ollama for embeddings: PersistentVolumeClaim, Deployment, Service
+  backend.yaml   FastAPI backend: Deployment, Service
+  frontend.yaml  React build served by nginx: Deployment, Service
+  schema.sql     pgvector extension and tables (safe to run twice)
+```
+
+### Prerequisites
+
+Docker, `kubectl` and `kind`, and a `.env` file with `ANTHROPIC_API_KEY` (see the Docker section).
+
+### Steps
+
+```bash
+# 1. Cluster and images (the cluster cannot see local images until they are loaded)
+kind create cluster --name cv
+docker compose build backend frontend
+kind load docker-image fastapiproject-backend:latest --name cv
+kind load docker-image fastapiproject-frontend:latest --name cv
+
+# 2. The API key, created from .env so it never appears in a manifest or in shell history
+kubectl create secret generic backend-secret --from-env-file=.env
+
+# 3. Everything else
+kubectl apply -f k8s/
+kubectl wait --for=condition=ready pod --all --timeout=10m
+
+# 4. Data: schema, embedding model, postings
+kubectl exec -i deploy/db -- psql -U cv cvanalyzer < k8s/schema.sql
+kubectl exec deploy/ollama -- ollama pull nomic-embed-text
+kubectl exec deploy/backend -- python seed.py
+
+# 5. Open the app
+kubectl port-forward svc/frontend 3001:80     # then http://localhost:3001
+```
+
+`make kind-up` and `make deploy` wrap steps 1 and 3.
+
+### How it fits together
+
+```
+browser → port-forward → frontend (nginx) ──/api──→ backend ──→ db      (pgvector)
+                                                        ├──→ ollama  (embeddings)
+                                                        └──→ Anthropic API
+```
+
+- **Services by name.** The backend reaches `db:5432` and `ollama:11434`, and nginx forwards `/api` to `backend:8000`. CoreDNS resolves these to Kubernetes Services, so the connection strings and the frontend image are identical to Docker Compose. The frontend needed no change at all, because it calls the relative path `/api` and has no backend URL baked in.
+- **Why Ollama runs in the cluster.** Retrieval always embeds the query with `nomic-embed-text` through Ollama, whichever provider writes the analysis. Running Ollama as its own Deployment keeps the cluster self-contained; the model lives on a PersistentVolumeClaim and survives pod restarts.
+- **Stateful vs stateless.** `db` and `ollama` each own one `ReadWriteOnce` volume and use the `Recreate` strategy, so two pods never write the same disk. `backend` and `frontend` are stateless, use rolling updates, and can be scaled: `kubectl scale deploy/backend --replicas=3`.
+- **Readiness probes.** `pg_isready` for Postgres, `/health` for the backend, `/` for Ollama and nginx. A pod only receives traffic once its probe passes; this replaces the Compose healthcheck.
+- **Resources.** The backend and Ollama declare CPU and memory requests and a memory limit, so Ollama cannot starve the database.
+- **Secrets.** The API key exists only in the cluster (created from `.env`) and in the git-ignored `.env`. The Postgres credentials in `db.yaml` are local development values.
+
+### Verified
+
+- `/match` works end to end inside the cluster: the backend embeds the CV through `ollama`, searches `db`, and calls Anthropic for the analyses.
+- Deleting pods: the Deployment replaces them within seconds. With three backend replicas, deleting one does not interrupt requests.
+- Rolling restart and rollback of the backend with `kubectl rollout`.
+
+### Limitations
+
+- **Local only.** Users reach the app through `kubectl port-forward`. A real cluster would add an Ingress or a Gateway API Gateway in front of the frontend Service, with TLS at the entry point.
+- **Manual data steps.** The schema, the model pull and the seed are run by hand; they would become a Kubernetes Job or init container.
+- **Single node.** kind runs one node, so replicas show self-healing and load spreading but not protection against a machine failing.
+- **`latest` image tags** with `imagePullPolicy: IfNotPresent`, which suits `kind load` but not a shared registry, where images would be pinned to versions.
+
 **Shortcuts**: make up, make test, make help.
 
 Then choose **Find matching jobs**, paste a CV, and submit.

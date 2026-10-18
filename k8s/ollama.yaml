@@ -38,6 +38,12 @@ spec:
           image: ollama/ollama
           ports:
             - containerPort: 11434
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
           readinessProbe:
             httpGet:
               path: /

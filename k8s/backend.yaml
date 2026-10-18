@@ -35,6 +35,12 @@ spec:
               value: http://ollama:11434/api/chat
             - name: OLLAMA_EMBED_URL
               value: http://ollama:11434/api/embeddings
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 3Gi
           envFrom:
             - secretRef:
                 name: backend-secret
